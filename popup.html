@@ -1,0 +1,140 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      width: 340px;
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      font-size: 13px;
+      color: #333;
+      background: #f8f9fa;
+    }
+    .header {
+      background: #8b0000;
+      color: white;
+      padding: 12px 16px;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+    .header h1 { font-size: 14px; font-weight: 600; }
+    .header .subtitle { font-size: 11px; opacity: 0.8; }
+    .header-icon {
+      width: 28px; height: 28px;
+      background: white; border-radius: 6px;
+      display: flex; align-items: center; justify-content: center;
+      font-size: 16px; flex-shrink: 0;
+    }
+
+    .section {
+      padding: 12px 16px;
+      border-bottom: 1px solid #e0e0e0;
+    }
+    .section:last-child { border-bottom: none; }
+    .section-title {
+      font-size: 11px; font-weight: 700;
+      text-transform: uppercase; color: #666;
+      margin-bottom: 8px; letter-spacing: 0.5px;
+    }
+
+    .status-row {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 4px 0;
+    }
+    .status-label { color: #666; }
+    .status-value { font-weight: 600; }
+    .status-ok { color: #27ae60; }
+    .status-warn { color: #e67e22; }
+    .status-error { color: #e74c3c; }
+
+    .btn {
+      padding: 6px 14px; border: none; border-radius: 4px;
+      font-size: 12px; font-weight: 600; cursor: pointer;
+    }
+    .btn-secondary { background: #e0e0e0; color: #333; }
+    .btn-secondary:hover { background: #d0d0d0; }
+    .btn-primary { background: #8b0000; color: white; }
+    .btn-primary:hover { background: #a00000; }
+    .btn-row { display: flex; gap: 8px; margin-top: 8px; }
+    .btn:disabled { opacity: 0.5; cursor: not-allowed; }
+
+    .log-entry {
+      padding: 4px 0; border-bottom: 1px solid #f0f0f0;
+      font-size: 12px; display: flex; align-items: center; gap: 6px;
+    }
+    .log-entry:last-child { border-bottom: none; }
+    .log-dot { width: 6px; height: 6px; border-radius: 50%; flex-shrink: 0; }
+    .log-dot.success { background: #27ae60; }
+    .log-dot.retried { background: #3498db; }
+    .log-dot.failed { background: #e74c3c; }
+    .log-time { color: #999; font-size: 11px; flex-shrink: 0; }
+    .log-text { color: #555; }
+    .log-empty { color: #999; font-style: italic; padding: 8px 0; }
+
+    .toast {
+      position: fixed; bottom: 10px; left: 50%; transform: translateX(-50%);
+      background: #333; color: white; padding: 6px 16px;
+      border-radius: 4px; font-size: 12px;
+      opacity: 0; transition: opacity 0.3s; pointer-events: none;
+    }
+    .toast.show { opacity: 1; }
+  </style>
+</head>
+<body>
+  <div class="header">
+    <div class="header-icon">📋</div>
+    <div>
+      <h1>Synapse Preinforme Capture</h1>
+      <div class="subtitle">HSJD — Captura automática</div>
+    </div>
+  </div>
+
+  <div class="section">
+    <div class="section-title">Estado</div>
+    <div class="status-row">
+      <span class="status-label">Conexión</span>
+      <span class="status-value" id="statusConnection">—</span>
+    </div>
+    <div class="status-row">
+      <span class="status-label">Capturados</span>
+      <span class="status-value" id="statusTotal">0</span>
+    </div>
+    <div class="status-row">
+      <span class="status-label">Última captura</span>
+      <span class="status-value" id="statusLast">—</span>
+    </div>
+    <div class="status-row">
+      <span class="status-label">Pendientes en cola</span>
+      <span class="status-value" id="statusQueue">0</span>
+    </div>
+    <div class="btn-row" id="retryRow" style="display: none;">
+      <button class="btn btn-secondary" id="btnRetry">Reintentar pendientes</button>
+    </div>
+  </div>
+
+  <div class="section">
+    <div class="section-title">Informes finales</div>
+    <div class="status-row">
+      <span class="status-label">Obtener informes validados desde Synapse</span>
+    </div>
+    <div class="btn-row">
+      <button class="btn btn-primary" id="btnFetchFinal">Obtener informes finales</button>
+    </div>
+    <div id="fetchStatus" style="font-size: 12px; color: #666; margin-top: 6px;"></div>
+  </div>
+
+  <div class="section">
+    <div class="section-title">Últimas capturas</div>
+    <div id="logContainer">
+      <div class="log-empty">Sin capturas aún</div>
+    </div>
+  </div>
+
+  <div class="toast" id="toast"></div>
+  <script src="popup.js"></script>
+</body>
+</html>
