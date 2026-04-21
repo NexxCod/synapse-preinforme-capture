@@ -1,33 +1,77 @@
 document.addEventListener('DOMContentLoaded', () => {
   loadStatus();
+  checkFetchProgress();
   document.getElementById('btnRetry').addEventListener('click', retryQueue);
-  document.getElementById('btnFetchFinal').addEventListener('click', fetchFinalReports);
+  document.getElementById('btnFetchFinal').addEventListener('click', startFetchFinalReports);
 });
 
-function fetchFinalReports() {
+let pollInterval = null;
+
+function startFetchFinalReports() {
   const btn = document.getElementById('btnFetchFinal');
   const status = document.getElementById('fetchStatus');
   btn.disabled = true;
   btn.textContent = 'Buscando...';
-  status.textContent = 'Consultando pendientes y descargando de Synapse...';
+  status.textContent = 'Iniciando búsqueda...';
+  status.style.color = '#666';
 
-  chrome.runtime.sendMessage({ type: 'FETCH_FINAL_REPORTS' }, (response) => {
+  chrome.runtime.sendMessage({ type: 'FETCH_FINAL_REPORTS' }, () => {
+    startProgressPolling();
+  });
+}
+
+function startProgressPolling() {
+  if (pollInterval) clearInterval(pollInterval);
+
+  pollInterval = setInterval(() => {
+    chrome.runtime.sendMessage({ type: 'GET_FETCH_PROGRESS' }, (progress) => {
+      if (chrome.runtime.lastError || !progress) return;
+      updateFetchUI(progress);
+
+      if (progress.status === 'done' || progress.status === 'error') {
+        clearInterval(pollInterval);
+        pollInterval = null;
+      }
+    });
+  }, 800);
+}
+
+function updateFetchUI(progress) {
+  const btn = document.getElementById('btnFetchFinal');
+  const status = document.getElementById('fetchStatus');
+
+  if (progress.status === 'running') {
+    btn.disabled = true;
+    btn.textContent = 'Buscando...';
+    status.textContent = progress.message || 'Procesando...';
+    status.style.color = '#666';
+  } else if (progress.status === 'done') {
     btn.disabled = false;
     btn.textContent = 'Obtener informes finales';
-    if (response) {
-      status.textContent = `${response.found} de ${response.pending} informes obtenidos` +
-        (response.errors ? ` (${response.errors} errores)` : '');
-      status.style.color = response.found > 0 ? '#27ae60' : '#666';
-    } else {
-      status.textContent = 'Error de comunicación';
-      status.style.color = '#e74c3c';
+    status.textContent = progress.message;
+    status.style.color = progress.found > 0 ? '#27ae60' : '#666';
+    loadStatus();
+  } else if (progress.status === 'error') {
+    btn.disabled = false;
+    btn.textContent = 'Obtener informes finales';
+    status.textContent = progress.message || 'Error';
+    status.style.color = '#e74c3c';
+  }
+}
+
+function checkFetchProgress() {
+  chrome.runtime.sendMessage({ type: 'GET_FETCH_PROGRESS' }, (progress) => {
+    if (chrome.runtime.lastError || !progress) return;
+    updateFetchUI(progress);
+    if (progress.status === 'running') {
+      startProgressPolling();
     }
   });
 }
 
 function loadStatus() {
   chrome.runtime.sendMessage({ type: 'GET_STATUS' }, (response) => {
-    if (!response) return;
+    if (chrome.runtime.lastError || !response) return;
 
     const connEl = document.getElementById('statusConnection');
     if (response.configured) {
@@ -60,6 +104,7 @@ function loadStatus() {
 
 function retryQueue() {
   chrome.runtime.sendMessage({ type: 'RETRY_NOW' }, () => {
+    if (chrome.runtime.lastError) return;
     showToast('Reintentando...');
     setTimeout(loadStatus, 3000);
   });

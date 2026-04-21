@@ -6,10 +6,6 @@
  */
 
 // ── Configuración hardcodeada ─────────────────────────────────────────
-// ⚠️  COMPLETAR ESTOS DOS VALORES ANTES DE DESPLEGAR:
-//     1. Ejecutar setup() en Apps Script
-//     2. Implementar como Web App
-//     3. Pegar la URL aquí y definir el token
 const CONFIG = {
   appsScriptUrl: 'https://script.google.com/macros/s/AKfycbwZ9jLBuR3NB4BIEq0TeivmzJMp3mrTc6g99zGaDDVXCXS5Bm-68MAn0nUI-eTnxzCIbg/exec',
   secretToken:   'hsjd_becados_QWERTy'
@@ -23,7 +19,8 @@ const MAX_RETRIES = 10;
 const STORAGE_KEYS = {
   retryQueue:    'retryQueue',
   captureLog:    'captureLog',
-  stats:         'stats'
+  stats:         'stats',
+  fetchProgress: 'fetchProgress'
 };
 
 // ── Listener de mensajes del content script ──────────────────────────
@@ -32,6 +29,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message.type === 'CAPTURE_PREINFORME') {
     handleCapture(message.data);
     sendResponse({ status: 'received' });
+    return false;
   }
 
   if (message.type === 'GET_STATUS') {
@@ -42,6 +40,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message.type === 'RETRY_NOW') {
     processRetryQueue();
     sendResponse({ status: 'retrying' });
+    return false;
   }
 
   if (message.type === 'CLEAR_QUEUE') {
@@ -52,9 +51,20 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
 
   if (message.type === 'FETCH_FINAL_REPORTS') {
-    fetchFinalReports().then(result => sendResponse(result));
+    sendResponse({ status: 'started' });
+    fetchFinalReports();
+    return false;
+  }
+
+  if (message.type === 'GET_FETCH_PROGRESS') {
+    chrome.storage.local.get(STORAGE_KEYS.fetchProgress, (result) => {
+      sendResponse(result[STORAGE_KEYS.fetchProgress] || null);
+    });
     return true;
   }
+
+  sendResponse({ status: 'unknown_message' });
+  return false;
 });
 
 // ── Captura principal ────────────────────────────────────────────────
@@ -92,7 +102,7 @@ async function sendToAppsScript(config, data) {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload),
-      signal: AbortSignal.timeout(15000) // 15 segundos timeout
+      signal: AbortSignal.timeout(15000)
     });
 
     if (!response.ok) {
@@ -128,14 +138,12 @@ async function addToRetryQueue(data, reason) {
     lastError: reason
   });
 
-  // Limitar la cola a 200 items para no llenar el storage
   if (queue.length > 200) {
     queue.splice(0, queue.length - 200);
   }
 
   await chrome.storage.local.set({ [STORAGE_KEYS.retryQueue]: queue });
 
-  // Asegurar que la alarma de reintentos esté activa
   const alarm = await chrome.alarms.get(RETRY_ALARM_NAME);
   if (!alarm) {
     chrome.alarms.create(RETRY_ALARM_NAME, {
@@ -177,22 +185,19 @@ async function processRetryQueue() {
       }
     }
 
-    // Pequeña pausa entre envíos para no saturar
     await new Promise(r => setTimeout(r, 500));
   }
 
   await chrome.storage.local.set({ [STORAGE_KEYS.retryQueue]: remaining });
 
-  // Notificar sobre fallos permanentes
   if (permanentlyFailed.length > 0) {
     showNotification(
       'Preinformes no guardados',
-      `${permanentlyFailed.length} preinforme(s) no pudieron ser guardados después de ${MAX_RETRIES} intentos. Revisa la configuración de la extensión.`
+      `${permanentlyFailed.length} preinforme(s) no pudieron ser guardados después de ${MAX_RETRIES} intentos.`
     );
     await updateStats('permanently_failed', permanentlyFailed.length);
   }
 
-  // Si no hay más items, limpiar la alarma
   if (remaining.length === 0) {
     chrome.alarms.clear(RETRY_ALARM_NAME);
   }
@@ -220,7 +225,6 @@ async function logCapture(data, status) {
     status: status
   });
 
-  // Mantener solo los últimos 100 registros
   if (log.length > 100) {
     log.splice(0, log.length - 100);
   }
@@ -272,19 +276,40 @@ function showNotification(title, message) {
   });
 }
 
-// ── Obtención de informes finales (fetch desde el navegador) ─────────
+// ── Progreso del fetch ───────────────────────────────────────────────
+
+async function setFetchProgress(progress) {
+  await chrome.storage.local.set({ [STORAGE_KEYS.fetchProgress]: progress });
+}
+
+// ── Obtención de informes finales (BATCH) ────────────────────────────
 
 /**
- * Flujo completo:
- * 1. GET al Apps Script → lista de accesos pendientes
+ * Flujo optimizado:
+ * 1. POST al Apps Script → lista de accesos pendientes
  * 2. Fetch a Synapse por cada acceso (red local del hospital)
- * 3. POST al Apps Script con cada informe encontrado
+ * 3. UN SOLO POST batch al Apps Script con TODOS los informes encontrados
+ *    → Apps Script abre cada spreadsheet UNA sola vez y escribe todo
+ *
+ * Antes: N informes × 21 spreadsheets = N×21 openById
+ * Ahora: 21 openById total (1 por spreadsheet), sin importar cuántos informes
  */
 async function fetchFinalReports() {
-  const result = { pending: 0, found: 0, errors: 0 };
+  const progress = {
+    status: 'running',
+    pending: 0,
+    found: 0,
+    errors: 0,
+    current: 0,
+    startedAt: new Date().toISOString(),
+    finishedAt: null,
+    message: 'Consultando pendientes...'
+  };
+
+  await setFetchProgress(progress);
 
   try {
-    // 1. Obtener lista de pendientes desde Apps Script (via POST)
+    // ── 1. Obtener lista de pendientes desde Apps Script ──
     const pendingResp = await fetch(CONFIG.appsScriptUrl, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -298,31 +323,43 @@ async function fetchFinalReports() {
 
     if (pendingData.status !== 'ok' || !pendingData.pending) {
       console.error('[SynapseCapture] Error obteniendo pendientes:', pendingData);
-      return { ...result, errors: 1 };
+      progress.status = 'error';
+      progress.errors = 1;
+      progress.message = 'Error obteniendo lista de pendientes';
+      progress.finishedAt = new Date().toISOString();
+      await setFetchProgress(progress);
+      return;
     }
 
     const pendingList = pendingData.pending;
-    result.pending = pendingList.length;
+    progress.pending = pendingList.length;
 
     if (pendingList.length === 0) {
-      console.log('[SynapseCapture] No hay informes finales pendientes');
-      return result;
+      progress.status = 'done';
+      progress.message = 'No hay informes finales pendientes';
+      progress.finishedAt = new Date().toISOString();
+      await setFetchProgress(progress);
+      return;
     }
 
     console.log(`[SynapseCapture] ${pendingList.length} informes finales pendientes`);
 
-    // 2. Fetch cada informe desde Synapse
-    for (const item of pendingList) {
-      let reportText = '';
-      let usedAccession = '';
+    // ── 2. Fetch cada informe desde Synapse (red hospital) ──
+    const foundReports = [];
 
-      // Probar cada accession hasta encontrar uno con informe
+    for (let idx = 0; idx < pendingList.length; idx++) {
+      const item = pendingList[idx];
+
+      progress.current = idx + 1;
+      progress.message = `Descargando de Synapse ${idx + 1}/${pendingList.length}...`;
+      await setFetchProgress(progress);
+
       for (const acc of item.accessions) {
         try {
           const text = await fetchSynapseReport(acc);
           if (text) {
-            reportText = text;
-            usedAccession = acc;
+            foundReports.push({ accession: acc, reportText: text });
+            console.log(`[SynapseCapture] Informe encontrado: ${acc} (${item.patient})`);
             break;
           }
         } catch (e) {
@@ -330,48 +367,72 @@ async function fetchFinalReports() {
         }
       }
 
-      if (!reportText) continue;
-
-      // 3. Enviar informe final al Apps Script
-      try {
-        const writeResp = await fetch(CONFIG.appsScriptUrl, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            token: CONFIG.secretToken,
-            action: 'finalreport',
-            accession: usedAccession,
-            reportText: reportText
-          }),
-          signal: AbortSignal.timeout(15000)
-        });
-
-        const writeResult = await writeResp.json();
-        if (writeResult.status === 'ok') {
-          result.found++;
-          console.log(`[SynapseCapture] Informe final guardado: ${usedAccession} (${item.patient})`);
-        }
-      } catch (e) {
-        console.error('[SynapseCapture] Error guardando informe final:', e);
-        result.errors++;
-      }
-
-      // Pausa entre requests
       await new Promise(r => setTimeout(r, 300));
+    }
+
+    progress.found = foundReports.length;
+
+    if (foundReports.length === 0) {
+      console.log('[SynapseCapture] Ningún informe final encontrado en Synapse');
+      progress.status = 'done';
+      progress.message = `0/${pendingList.length} informes disponibles en Synapse`;
+      progress.finishedAt = new Date().toISOString();
+      await setFetchProgress(progress);
+      return;
+    }
+
+    // ── 3. Enviar TODOS los informes en un solo POST batch ──
+    progress.message = `Guardando ${foundReports.length} informes en Sheets...`;
+    await setFetchProgress(progress);
+
+    console.log(`[SynapseCapture] Enviando batch de ${foundReports.length} informes al Apps Script`);
+
+    try {
+      const writeResp = await fetch(CONFIG.appsScriptUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          token: CONFIG.secretToken,
+          action: 'finalreport_batch',
+          reports: foundReports
+        }),
+        signal: AbortSignal.timeout(120000)  // 2 min — Apps Script puede tardar
+      });
+
+      const writeResult = await writeResp.json();
+
+      if (writeResult.status === 'ok') {
+        console.log(`[SynapseCapture] Batch guardado: ${writeResult.written} escrituras en ${writeResult.sheetsProcessed} hojas`);
+      } else {
+        console.error('[SynapseCapture] Error en batch:', writeResult.error);
+        progress.errors++;
+      }
+    } catch (e) {
+      console.error('[SynapseCapture] Error enviando batch:', e);
+      progress.errors++;
     }
 
   } catch (error) {
     console.error('[SynapseCapture] Error en fetchFinalReports:', error);
-    result.errors++;
+    progress.errors++;
   }
 
-  console.log(`[SynapseCapture] Resultado: ${result.found}/${result.pending} informes obtenidos`);
-  return result;
+  // ── Finalizar ──
+  progress.status = 'done';
+  progress.finishedAt = new Date().toISOString();
+  progress.message = `${progress.found}/${progress.pending} informes obtenidos` +
+    (progress.errors ? ` (${progress.errors} errores)` : '');
+  await setFetchProgress(progress);
+
+  if (progress.found > 0 || progress.errors > 0) {
+    showNotification('Informes finales', progress.message);
+  }
+
+  console.log(`[SynapseCapture] Resultado: ${progress.found}/${progress.pending} informes obtenidos`);
 }
 
 /**
  * Fetch un informe desde Synapse y extrae el texto de div#tConteudo.
- * Retorna texto plano o '' si no hay informe disponible.
  */
 async function fetchSynapseReport(accession) {
   const url = SYNAPSE_REPORT_URL + encodeURIComponent(accession);
@@ -388,13 +449,11 @@ async function fetchSynapseReport(accession) {
 
   const html = await response.text();
 
-  // Verificar que no sea mensaje de error
   if (html.includes('Report is not available')) {
     console.log('[SynapseCapture] Informe no disponible aún para', accession);
     return '';
   }
 
-  // Extraer contenido de div#tConteudo (regex simple)
   const match = html.match(/<div id="tConteudo">([\s\S]*?)<\/div>/i);
   if (!match || !match[1]) {
     console.log('[SynapseCapture] No se encontró tConteudo para', accession);
@@ -403,7 +462,6 @@ async function fetchSynapseReport(accession) {
 
   const reportHtml = match[1].trim();
 
-  // Verificar que no sea vacío
   if (reportHtml.length < 20) {
     console.log('[SynapseCapture] tConteudo vacío para', accession);
     return '';
@@ -427,7 +485,6 @@ function htmlToPlainTextBg(html) {
     .replace(/<\/h[1-6]>/gi, '\n\n')
     .replace(/<[^>]*>/g, '');
 
-  // Decodificar entidades HTML manualmente (sin DOMParser)
   const entities = {
     '&amp;': '&', '&lt;': '<', '&gt;': '>', '&quot;': '"', '&#39;': "'",
     '&aacute;': 'á', '&eacute;': 'é', '&iacute;': 'í', '&oacute;': 'ó', '&uacute;': 'ú',
@@ -442,7 +499,6 @@ function htmlToPlainTextBg(html) {
     text = text.split(ent).join(char);
   }
 
-  // Entidades numéricas (&#233; → é)
   text = text.replace(/&#(\d+);/g, (m, code) => String.fromCharCode(parseInt(code, 10)));
 
   text = text
